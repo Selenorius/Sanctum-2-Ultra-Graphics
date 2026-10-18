@@ -1,0 +1,275 @@
+#define CSHADE_DLAA
+
+/*
+    This shader implements Directionally Localized Anti-Aliasing (DLAA). It reduces aliasing artifacts by detecting and smoothing edges while preserving fine details. The shader differentiates between short and long edges, applying specialized processing based on configurable contrast thresholds. It also includes an option to retain high frequencies and display edge masks for visualization.
+*/
+
+/*
+    Directionally Localized Anti-Aliasing (DLAA)
+    http://www.and.intercon.ru/releases/talks/dlaagdc2011/
+
+    by Dmitry Andreev
+    Copyright (C) LucasArts 2010-2011
+*/
+
+#include "shared/cColor.fxh"
+
+/* Shader Options */
+
+uniform bool _PreserveFrequencies <
+    ui_label = "Retain Fine Details";
+    ui_type = "radio";
+    ui_tooltip = "When enabled, the shader attempts to retain fine details and high-frequency information in the image, preventing them from being blurred by the anti-aliasing process.";
+> = true;
+
+uniform int _DisplayMode <
+    ui_items = "Image\0Short Edge Mask\0Long Edge Mask\0";
+    ui_label = "Display Mode";
+    ui_type = "combo";
+    ui_tooltip = "Selects the visual output mode: either the anti-aliased image, a mask highlighting short edges, or a mask highlighting long edges.";
+> = 0;
+
+uniform int _ShortEdgesScale <
+    ui_label = "Short Edges Scale";
+    ui_max = 4.0;
+    ui_min = 0.0;
+    ui_type = "slider";
+    ui_tooltip = "How much to scale short edges.";
+> = 3.0;
+
+uniform int _ShortEdgesContrastThreshold <
+    ui_items = "\0Very Low\0Low\0Medium\0High\0Very High\0";
+    ui_label = "Short Edges Contrast Threshold";
+    ui_type = "combo";
+    ui_tooltip = "The minimum amount of noise required to detect short edges.";
+> = 2;
+
+uniform int _LongEdgesContrastThreshold <
+    ui_items = "\0Very Low\0Low\0Medium\0High\0Very High\0";
+    ui_label = "Long Edges Contrast Threshold";
+    ui_type = "combo";
+    ui_tooltip = "The minimum amount of noise required to detect long edges.";
+> = 3;
+
+static const float ContrastThresholds[6] =
+{
+    0.0, 1.0 / 16.0, 1.0 / 8.0, 1.0 / 6.0, 1.0 / 4.0, 1.0 / 3.0
+};
+
+#define CSHADE_APPLY_AUTO_EXPOSURE 0
+#define CSHADE_APPLY_ABBERATION 0
+#include "shared/cShade.fxh"
+
+CSHADE_CREATE_TEXTURE_POOLED(SharedTex_RGBA8_0, CSHADE_BUFFER_SIZE_0, RGBA8, 0)
+CSHADE_CREATE_SAMPLER(SampleSharedTex0, SharedTex_RGBA8_0, LINEAR, LINEAR, LINEAR, MIRROR, MIRROR, MIRROR)
+
+float GetIntensity(float3 Color)
+{
+    return dot(Color, 1.0 / 3.0);
+}
+
+void PS_Prefilter(CShade_VS2PS_Quad Input, out float4 Output : SV_TARGET0)
+{
+    float2 Delta = fwidth(Input.Tex0.xy);
+    float4 EdgeTex0 = Input.Tex0.xyxy + (float4(-1.0, 0.0, 1.0, 0.0) * Delta.xyxy);
+    float4 EdgeTex1 = Input.Tex0.xyxy + (float4(0.0, -1.0, 0.0, 1.0) * Delta.xyxy);
+
+    float3 Neighborhood[4];
+    float3 Center = tex2Dlod(CShade_SampleGammaTex, CMath_PadFloat2(Input.Tex0)).rgb;
+    Neighborhood[0] = tex2Dlod(CShade_SampleGammaTex, CMath_PadFloat2(EdgeTex0.xy)).rgb;
+    Neighborhood[1] = tex2Dlod(CShade_SampleGammaTex, CMath_PadFloat2(EdgeTex0.zw)).rgb;
+    Neighborhood[2] = tex2Dlod(CShade_SampleGammaTex, CMath_PadFloat2(EdgeTex1.xy)).rgb;
+    Neighborhood[3] = tex2Dlod(CShade_SampleGammaTex, CMath_PadFloat2(EdgeTex1.zw)).rgb;
+
+    // Compass edge detection on N/S/E/W
+    float3 Edges = 0.0;
+    Edges = max(Edges, abs(Center - Neighborhood[0]));
+    Edges = max(Edges, abs(Center - Neighborhood[1]));
+    Edges = max(Edges, abs(Center - Neighborhood[2]));
+    Edges = max(Edges, abs(Center - Neighborhood[3]));
+
+    Output.rgb = Center;
+    Output.a = smoothstep(0.0, 0.25, GetIntensity(Edges));
+}
+
+void PS_Main(CShade_VS2PS_Quad Input, out float4 Output : SV_TARGET0)
+{
+    float2 Delta = fwidth(Input.Tex0);
+
+    float4 Center = tex2Dlod(CShade_SampleGammaTex, CMath_PadFloat2(Input.Tex0));
+
+    float4 ShortTex1 = Input.Tex0.xyxy + (float4(-1.0, 0.0, 1.0, 0.0) * Delta.xyxy);
+    float4 ShortTex2 = Input.Tex0.xyxy + (float4(0.0, -1.0, 0.0, 1.0) * Delta.xyxy);
+
+    float4 Left = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(ShortTex1.xy));
+    float4 Right = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(ShortTex1.zw));
+    float4 Top = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(ShortTex2.xy));
+    float4 Bottom = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(ShortTex2.zw));
+
+    float4 LongTex0 = Input.Tex0.xyxy + (float4(1.5, 0.0, 0.0, 1.5) * Delta.xyxy);
+    float4 LongTex1 = Input.Tex0.xyxy + (float4(3.5, 0.0, 0.0, 3.5) * Delta.xyxy);
+    float4 LongTex2 = Input.Tex0.xyxy + (float4(5.5, 0.0, 0.0, 5.5) * Delta.xyxy);
+    float4 LongTex3 = Input.Tex0.xyxy + (float4(7.5, 0.0, 0.0, 7.5) * Delta.xyxy);
+    float4 LongTex4 = Input.Tex0.xyxy + (float4(-1.5, 0.0, 0.0, -1.5) * Delta.xyxy);
+    float4 LongTex5 = Input.Tex0.xyxy + (float4(-3.5, 0.0, 0.0, -3.5) * Delta.xyxy);
+    float4 LongTex6 = Input.Tex0.xyxy + (float4(-5.5, 0.0, 0.0, -5.5) * Delta.xyxy);
+    float4 LongTex7 = Input.Tex0.xyxy + (float4(-7.5, 0.0, 0.0, -7.5) * Delta.xyxy);
+
+    float4 H0 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(LongTex0.xy));
+    float4 H1 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(LongTex1.xy));
+    float4 H2 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(LongTex2.xy));
+    float4 H3 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(LongTex3.xy));
+    float4 H4 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(LongTex4.xy));
+    float4 H5 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(LongTex5.xy));
+    float4 H6 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(LongTex6.xy));
+    float4 H7 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(LongTex7.xy));
+
+    float4 V0 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(LongTex0.zw));
+    float4 V1 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(LongTex1.zw));
+    float4 V2 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(LongTex2.zw));
+    float4 V3 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(LongTex3.zw));
+    float4 V4 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(LongTex4.zw));
+    float4 V5 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(LongTex5.zw));
+    float4 V6 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(LongTex6.zw));
+    float4 V7 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(LongTex7.zw));
+
+    /*
+        Short edges
+    */
+
+    float CenterLuma = GetIntensity(Center.rgb);
+    float LeftLuma = GetIntensity(Left.rgb);
+    float RightLuma = GetIntensity(Right.rgb);
+    float TopLuma = GetIntensity(Top.rgb);
+    float BottomLuma = GetIntensity(Bottom.rgb);
+
+    // 3-pixel wide high-pass
+    float4 EdgeH = abs((Left + Right) - (2.0 * Center)) / 2.0;
+    float4 EdgeV = abs((Top + Bottom) - (2.0 * Center)) / 2.0;
+
+    // Get low-pass
+    float4 WH = 2.0 * (H4 + H0);
+    float4 WV = 2.0 * (V0 + V4);
+    float4 BlurH = (WH + (2.0 * Center)) / 6.0;
+    float4 BlurV = (WV + (2.0 * Center)) / 6.0;
+
+    // Get respective intensities
+    float EdgeLumaH = GetIntensity(EdgeH.rgb);
+    float EdgeLumaV = GetIntensity(EdgeV.rgb);
+
+    float MaxLumaH = max(CenterLuma, max(LeftLuma, RightLuma));
+    float MinLumaH = min(CenterLuma, min(LeftLuma, RightLuma));
+    float RangeLumaH = MaxLumaH - MinLumaH;
+
+    float MaxLumaV = max(CenterLuma, max(TopLuma, BottomLuma));
+    float MinLumaV = min(CenterLuma, min(TopLuma, BottomLuma));
+    float RangeLumaV = MaxLumaV - MinLumaV;
+
+    float BlurLumaH = GetIntensity(BlurH.rgb);
+    float BlurLumaV = GetIntensity(BlurV.rgb);
+
+    // Edge masks
+    float EdgeMaskH = saturate((_ShortEdgesScale * EdgeLumaH - ContrastThresholds[_ShortEdgesContrastThreshold]) / RangeLumaV);
+    float EdgeMaskV = saturate((_ShortEdgesScale * EdgeLumaV - ContrastThresholds[_ShortEdgesContrastThreshold]) / RangeLumaH);
+
+    float4 Color = Center;
+    Color = lerp(Color, BlurH, EdgeMaskV);
+    Color = lerp(Color, BlurV, EdgeMaskH);
+
+    /*
+        Long edges
+    */
+
+    // In CShade, we take .rgb out of branch
+    float4 LongBlurH = (H0 + H1 + H2 + H3 + H4 + H5 + H6 + H7) / 8.0;
+    float4 LongBlurV = (V0 + V1 + V2 + V3 + V4 + V5 + V6 + V7) / 8.0;
+
+    float LongEdgeMaskH = saturate(CMath_UNORMtoSNORM_FLT1(LongBlurH.a));
+    float LongEdgeMaskV = saturate(CMath_UNORMtoSNORM_FLT1(LongBlurV.a));
+
+    // Put the criteria into a variable.
+    bool IsLongEdge = abs(LongEdgeMaskH - LongEdgeMaskV) > ContrastThresholds[_LongEdgesContrastThreshold];
+
+    // This is for the "Long Edge Mask" Render Mode.
+    float LongEdgeMaskDebugH = LongEdgeMaskH * IsLongEdge;
+    float LongEdgeMaskDebugV = LongEdgeMaskV * IsLongEdge;
+
+    if (IsLongEdge)
+    {
+        float LongBlurLumaH = GetIntensity(LongBlurH.rgb);
+        float LongBlurLumaV = GetIntensity(LongBlurV.rgb);
+
+        float4 ColorH = Center;
+        float4 ColorV = Center;
+
+        // Vectorized search
+        float HX = saturate(0.0 + (LongBlurLumaH - TopLuma) / (CenterLuma - TopLuma));
+        float HY = saturate(1.0 + (LongBlurLumaH - CenterLuma) / (CenterLuma - BottomLuma));
+        float VX = saturate(0.0 + (LongBlurLumaV - LeftLuma) / (CenterLuma - LeftLuma));
+        float VY = saturate(1.0 + (LongBlurLumaV - CenterLuma) / (CenterLuma - RightLuma));
+
+        float4 VHXY = float4(VX, VY, HX, HY);
+        VHXY = (VHXY == 0.0) ? 1.0 : VHXY;
+
+        ColorV = lerp(Left, ColorV, VHXY.x);
+        ColorV = lerp(Right, ColorV, VHXY.y);
+        ColorH = lerp(Top, ColorH, VHXY.z);
+        ColorH = lerp(Bottom, ColorH, VHXY.w);
+
+        Color = lerp(Color, ColorV, LongEdgeMaskV);
+        Color = lerp(Color, ColorH, LongEdgeMaskH);
+    }
+
+    // Preserve high frequencies
+    if (_PreserveFrequencies)
+    {
+        float4 RTex = Input.Tex0.xyxy + (Delta.xyxy * float4(-1.5, -1.5, 1.5, 1.5));
+        float4 R0 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(RTex.xw));
+        float4 R1 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(RTex.zw));
+        float4 R2 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(RTex.xy));
+        float4 R3 = tex2Dlod(SampleSharedTex0, CMath_PadFloat2(RTex.zy));
+
+        float4 R = (4.0 * (R0 + R1 + R2 + R3) + Center + V0 + V4 + H4 + H0) / 25.0;
+        Color = lerp(Color, Center, saturate(R.a * 3.0 - 1.5));
+    }
+
+    switch (_DisplayMode)
+    {
+        case 1:
+            Color.rgb = float3(EdgeMaskH, EdgeMaskV, 0.0);
+            break;
+        case 2:
+            Color.rgb = float3(LongEdgeMaskDebugH, LongEdgeMaskDebugV, 0.0);
+            break;
+    }
+
+    // RENDER
+    #if defined(CSHADE_BLENDING)
+        Output = float4(Color.rgb, _CShade_AlphaFactor);
+    #else
+        Output = float4(Color.rgb, 1.0);
+    #endif
+    CShade_Render(Output, Input.HPos.xy, Input.Tex0);
+}
+
+technique CShade_DLAA
+<
+    ui_label = "CShade | Directionally Localized Anti-Aliasing";
+    ui_tooltip = "Directionally Localized Anti-Aliasing (DLAA).";
+>
+{
+    pass Prefilter
+    {
+        VertexShader = CShade_VS_Quad;
+        PixelShader = PS_Prefilter;
+        RenderTarget0 = SharedTex_RGBA8_0;
+    }
+
+    pass DirectionallyLocalizedAntiAliasing
+    {
+        CBLEND_CREATE_STATES()
+
+        VertexShader = CShade_VS_Quad;
+        PixelShader = PS_Main;
+    }
+}
